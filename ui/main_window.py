@@ -11,6 +11,7 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 # Проверка наличия модулей ядра и корректности путей импорта
 try:
     from core.scanner import AssetScanner, ScanResult
+    from ui.models import FilesTableModel
 except ImportError:
     print("[!] Ошибка импорта. Убедитесь, что запускаете скрипт из корня проекта.")
     sys.exit(1)
@@ -68,8 +69,10 @@ class MainWindow(QMainWindow):
     def __init__(self):
         """Инициализация главного окна и конфигурация графических компонентов."""
         super().__init__()
-        self.setWindowTitle("S.T.A.L.K.E.R. Optimizer Lab")
+        self.setWindowTitle("Stalker Texture Intelligence Analyzer & Optimizer")
         self.resize(1000, 700)
+
+        self.files_model = FilesTableModel()
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -141,6 +144,12 @@ class MainWindow(QMainWindow):
     def _setup_table_panel(self):
         """Настройка основного компонента отображения данных сканирования."""
         self.table_view = QTableView()
+        self.table_view.setModel(self.files_model)
+        self.table_view.setSortingEnabled(True)
+
+        header = self.table_view.horizontalHeader()
+        header.setStretchLastSection(True)
+
         self.main_layout.addWidget(self.table_view, stretch=1)
 
     def _setup_bottom_panel(self):
@@ -242,6 +251,9 @@ class MainWindow(QMainWindow):
         if result is None:
             self.lbl_status.setText("Статус: Ошибка сканирования.")
             return
+
+        self.files_model.update_data(result.files)
+        self.table_view.resizeColumnsToContents()
 
         summary = result.summary
         self.lbl_status.setText(f"Статус: Завершено. Файлов: {summary['count']} | Вес: {summary['total_size_mb']} МБ | Время: {summary['time_sec']} с.")
