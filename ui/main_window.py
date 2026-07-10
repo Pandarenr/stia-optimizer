@@ -11,7 +11,7 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 # Проверка наличия модулей ядра и корректности путей импорта
 try:
     from core.scanner import AssetScanner, ScanResult
-    from ui.models import FilesTableModel
+    from ui.models import FilesTableModel, AssetFilterProxyModel
 except ImportError:
     print("[!] Ошибка импорта. Убедитесь, что запускаете скрипт из корня проекта.")
     sys.exit(1)
@@ -26,7 +26,7 @@ class ScanWorker(QThread):
     status_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(object)
 
-    def __init__(self, target_path):
+    def __init__(self, target_path, exceptions):
         """
         Инициализация потока сканирования.
 
@@ -34,6 +34,7 @@ class ScanWorker(QThread):
         """
         super().__init__()
         self.target_path = target_path
+        self.exceptions = exceptions
 
     def run(self):
         """
@@ -72,7 +73,17 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Stalker Texture Intelligence Analyzer & Optimizer")
         self.resize(1000, 700)
 
+        self.config = {
+            "max_top_tokens": 20,
+            "default_exceptions": "ui, sky, map, intro"
+        }
+
         self.files_model = FilesTableModel()
+
+        self.proxy_model = AssetFilterProxyModel()
+        self.proxy_model.setSourceModel(self.files_model)
+
+        self.current_top_tokens = set()
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -144,7 +155,7 @@ class MainWindow(QMainWindow):
     def _setup_table_panel(self):
         """Настройка основного компонента отображения данных сканирования."""
         self.table_view = QTableView()
-        self.table_view.setModel(self.files_model)
+        self.table_view.setModel(self.proxy_model)
         self.table_view.setSortingEnabled(True)
 
         header = self.table_view.horizontalHeader()
@@ -220,7 +231,9 @@ class MainWindow(QMainWindow):
 
         self._clear_filters()
 
-        self.scan_worker = ScanWorker(target_path)
+        exceptions = {e.strip() for e in self.exceptions_input.text().split(',') if e.strip()}
+
+        self.scan_worker = ScanWorker(target_path, exceptions)
         self.scan_worker.log_signal.connect(self.add_log)
         self.scan_worker.status_signal.connect(self.lbl_status.setText)
         self.scan_worker.finished_signal.connect(self.on_scan_finished)
@@ -263,29 +276,80 @@ class MainWindow(QMainWindow):
 
     def _populate_filters(self, token_stats):
         """
-        Генерация набора чекбоксов для фильтрации результатов на основе статистики токенов.
+        Инициализирует графические компоненты фильтрации на основе статистических данных.
+        Динамически формирует сетку чекбоксов для наиболее ресурсоемких категорий (токенов).
 
-        :param token_stats: Словарь со статистическими данными распределения ресурсов.
+        :param token_stats: Статистика распределения веса ресурсов по токенам.
         """
+        self.current_top_tokens.clear()
         sorted_tokens = sorted(token_stats.items(), key=lambda x: x[1]['total_size_mb'], reverse=True)
 
         max_columns = 5
         row, col = 0, 0
+        limit = self.config.get("max_top_tokens", 25)
 
-        for token, stats in sorted_tokens[:25]:
+        for token, stats in sorted_tokens[:limit]:
+            self.current_top_tokens.add(token)
+
             cb_text = f"{token} ({stats['total_size_mb']:.1f} MB)"
             cb = QCheckBox(cb_text)
 
             exceptions = [e.strip() for e in self.exceptions_input.text().split(',')]
+
             if token in exceptions:
                 cb.setChecked(False)
-                cb.setEnabled(False)
+                # cb.setEnabled(False) # Опциональная блокировка изменения состояния исключенных категорий
             else:
                 cb.setChecked(True)
 
-            self.filters_layout.addWidget(cb, row, col)
+            cb.toggled.connect(self.apply_filters)
 
+            self.filters_layout.addWidget(cb, row, col)
             col += 1
             if col >= max_columns:
                 col = 0
                 row += 1
+
+        self.cb_others = QCheckBox("OTHERS (Разное)")
+        self.cb_others.setChecked(True)
+        self.cb_others.toggled.connect(self.apply_filters)
+        self.filters_layout.addWidget(self.cb_others, row, col)
+
+        self.apply_filters()
+
+    def get_selected_tokens(self):
+        """
+        Выполняет обход виджетов в слое фильтров и формирует список активных токенов.
+
+        :return: Список строковых идентификаторов выбранных токенов.
+        """
+        selected = []
+        for i in range(self.filters_layout.count()):
+            item = self.filters_layout.itemAt(i)
+            widget = item.widget()
+            if isinstance(widget, QCheckBox) and widget.isChecked():
+                token = widget.text().split(' ')[0]
+                selected.append(token)
+        return selected
+
+    def apply_filters(self):
+        """
+        Агрегирует состояние элементов управления интерфейса и обновляет параметры прокси-модели.
+        Синхронизирует выбор пользователя с логикой фильтрации QSortFilterProxyModel.
+        """
+        selected = set()
+        for i in range(self.filters_layout.count()):
+            w = self.filters_layout.itemAt(i).widget()
+            if isinstance(w, QCheckBox) and w != getattr(self, 'cb_others', None):
+                if w.isChecked():
+                    token = w.text().split(' ')[0]
+                    selected.add(token)
+
+        forbidden = {e.strip() for e in self.exceptions_input.text().split(',') if e.strip()}
+
+        self.proxy_model.set_filter_params(
+            selected_tokens=selected,
+            show_others=self.cb_others.isChecked(),
+            top_tokens_list=self.current_top_tokens,
+            forbidden_tokens=forbidden
+        )
