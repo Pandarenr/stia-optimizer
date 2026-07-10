@@ -6,7 +6,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Generator, Any
 
-# Карта распространенных DX10 форматов (DXGI_FORMAT)
+# Соответствие идентификаторов DXGI_FORMAT их строковым представлениям
 DXGI_FORMAT_MAP = {
     71: "BC1_UNORM", 74: "BC2_UNORM", 77: "BC3_UNORM",
     80: "BC4_UNORM", 83: "BC5_UNORM", 95: "BC6H_UF16",
@@ -15,6 +15,13 @@ DXGI_FORMAT_MAP = {
 
 @dataclass
 class ScanResult:
+    """
+    Контейнер для хранения агрегированных результатов сканирования ресурсов.
+
+    :ivar summary: Общая статистическая информация (количество, объем, время выполнения).
+    :ivar token_stats: Статистические данные распределения веса по категориям (токенам).
+    :ivar files: Список метаданных всех обработанных файлов.
+    """
     summary: dict[str, Any] = field(default_factory=dict)
     token_stats: dict[str, dict[str, Any]] = field(default_factory=dict)
     files: list[dict[str, Any]] = field(default_factory=list)
@@ -22,34 +29,40 @@ class ScanResult:
 
 class AssetScanner:
     """
-    Класс для рекурсивного сканирования ресурсов и извлечения метаданных из DDS файлов.
+    Обеспечивает рекурсивное сканирование файловой системы для анализа DDS-ресурсов
+    и извлечения технических метаданных из их заголовков.
     """
-    # Пре-компилированное регулярное выражение для ускорения токенизации.
-    # Ищет последовательности букв (лат/кир) и цифр в нижнем регистре.
+    # Пре-компиляция регулярного выражения для минимизации накладных расходов при массовой токенизации
     _TOKEN_PATTERN = re.compile(r'[a-z0-9а-яё]+')
 
-    # Набор исключений (set обеспечивает поиск за O(1))
+    # Использование множества (set) для обеспечения константной сложности поиска O(1)
     IGNORE_TOKENS = {'gamedata', 'textures', 'dds'}
 
     def __init__(self, target_path: str | Path):
+        """
+        Инициализация сканера.
+
+        :param target_path: Базовый путь для начала сканирования.
+        """
         self.target_path = Path(target_path).resolve()
         self.mode = self._detect_mode()
 
-        # Состояние сканирования
         self._stats = {"count": 0, "total_size_mb": 0.0, "time_sec": 0.0}
         self._token_stats: dict[str, dict[str, float | int]] = {}
         self._files: list[dict[str, Any]] = []
 
     def _detect_mode(self) -> str:
-        """Автоматическое определение структуры папки (MO2, Single Mod, Raw)."""
+        """
+        Определение типа структуры целевой директории (MO2, Single Mod или RAW).
+
+        :return: Строковой идентификатор режима работы.
+        """
         if not self.target_path.is_dir():
             return "RAW"
 
-        # Проверка на Single Mod
         if (self.target_path / 'gamedata' / 'textures').exists():
             return "SINGLE"
 
-        # Проверка на MO2 Mods (хотя бы одна подпапка содержит gamedata/textures)
         try:
             for child in self.target_path.iterdir():
                 if child.is_dir() and (child / 'gamedata' / 'textures').exists():
@@ -62,8 +75,10 @@ class AssetScanner:
     @staticmethod
     def parse_dds_header(file_path: Path) -> dict[str, int | str] | None:
         """
-        Чтение и парсинг заголовка DDS без загрузки всего файла.
-        Исправлено: корректные смещения для Width, Height и MipMaps.
+        Выполняет парсинг бинарного заголовка DDS без полной десериализации файла.
+
+        :param file_path: Путь к DDS-файлу.
+        :return: Словарь с параметрами изображения или None, если файл не является валидным DDS.
         """
         try:
             with open(file_path, 'rb') as f:
@@ -71,17 +86,17 @@ class AssetScanner:
                 if len(data) < 128 or data[:4] != b'DDS ':
                     return None
 
-                # Height (12), Width (16)
+                # Смещения согласно спецификации DirectDraw Surface: Height (12), Width (16)
                 height, width = struct.unpack_from('<II', data, 12)
 
-                # MipMapCount (28) — Pitch (20) и Depth (24) пропускаем
+                # MipMapCount располагается по смещению 28
                 mipmap_count = struct.unpack_from('<I', data, 28)[0]
 
-                # PixelFormat -> FourCC (84)
+                # Извлечение FourCC для определения формата сжатия (смещение 84)
                 fourcc = data[84:88]
 
                 if fourcc == b'DX10':
-                    # Читаем расширенный заголовок DX10 (еще 20 байт после основного 128-байтного)
+                    # Чтение расширенного заголовка DX10 (20 байт) для современных форматов сжатия
                     dx10_data = f.read(20)
                     if len(dx10_data) == 20:
                         dxgi_format = struct.unpack_from('<I', dx10_data, 0)[0]
@@ -89,7 +104,7 @@ class AssetScanner:
                     else:
                         fmt = "DX10_ERR"
                 elif fourcc == b'\x00\x00\x00\x00':
-                    # Для несжатых форматов смотрим RGBBitCount (смещение 88)
+                    # Обработка несжатых форматов на основе RGBBitCount (смещение 88)
                     rgb_bits = struct.unpack_from('<I', data, 88)[0]
                     fmt = f"RAW_{rgb_bits}BPP"
                 else:
@@ -109,21 +124,13 @@ class AssetScanner:
 
     def _tokenize(self, text: str) -> list[str]:
         """
-        Разбивает строку (путь или имя файла) на список уникальных ключевых слов.
+        Анализирует строку и извлекает уникальные значимые токены для категоризации.
 
-        Процесс:
-        1. Приведение всей строки к нижнему регистру.
-        2. Извлечение слов через регулярное выражение.
-        3. Фильтрация слишком коротких слов и технических терминов.
-        4. Удаление дубликатов через set comprehension.
-
-        :param text: Строка для анализа (например, 'act/act_stalker_bump').
-        :return: Список очищенных токенов ['act', 'stalker', 'bump'].
+        :param text: Входная строка для анализа.
+        :return: Список нормализованных уникальных токенов.
         """
-        # Приводим к нижнему регистру один раз для всей строки
         text_lc = text.lower()
 
-        # Находим все совпадения, фильтруем и убираем дубликаты за один проход
         tokens = {
             token for token in self._TOKEN_PATTERN.findall(text_lc)
             if len(token) >= 2 and token not in self.IGNORE_TOKENS and not token.isdigit()
@@ -132,7 +139,12 @@ class AssetScanner:
         return list(tokens)
 
     def _resolve_paths_and_mod(self, file_path: Path) -> tuple[str, str]:
-        """Определяет имя мода и относительный путь файла на основе режима."""
+        """
+        Вычисляет принадлежность файла к конкретной модификации и определяет его относительный путь.
+
+        :param file_path: Полный путь к файлу.
+        :return: Кортеж (имя_мода, относительный_путь).
+        """
         rel_to_target = file_path.relative_to(self.target_path)
         parts = rel_to_target.parts
 
@@ -144,7 +156,6 @@ class AssetScanner:
                 mod_name = parts[0]
             try:
                 tex_idx = parts.index('textures')
-                # Путь относительно папки textures
                 rel_path_str = str(Path(*parts[tex_idx+1:-1])) if len(parts) - 1 > tex_idx else ""
             except ValueError:
                 rel_path_str = str(file_path.parent.relative_to(self.target_path))
@@ -160,7 +171,6 @@ class AssetScanner:
         else: # RAW
             rel_path_str = str(file_path.parent.relative_to(self.target_path))
 
-        # Очистка rel_path, если файл лежит прямо в textures
         if rel_path_str == ".":
             rel_path_str = ""
 
@@ -168,8 +178,10 @@ class AssetScanner:
 
     def scan_generator(self) -> Generator[dict[str, Any], None, None]:
         """
-        Генератор сканирования. Итерирует по файлам, возвращает инфу по каждому
-        и позволяет UI не блокироваться.
+        Выполняет итеративное сканирование файловой структуры.
+        Использование генератора позволяет обрабатывать данные без блокировки вызывающего потока.
+
+        :yield: Словарь с результатами анализа текущего файла.
         """
         start_time = time.time()
 
@@ -187,7 +199,6 @@ class AssetScanner:
                 size_mb = round(os.path.getsize(file_path) / (1024 * 1024), 4)
                 mod_name, rel_path = self._resolve_paths_and_mod(file_path)
 
-                # Токенизируем относительный путь + имя файла (без расширения)
                 tokens = self._tokenize(f"{rel_path}/{file_path.stem}")
 
                 file_data = {
@@ -202,12 +213,10 @@ class AssetScanner:
                     "tokens": tokens
                 }
 
-                # Обновляем статистику
                 self._stats["count"] += 1
                 self._stats["total_size_mb"] += size_mb
                 self._files.append(file_data)
 
-                # Обновляем статистику токенов
                 for token in tokens:
                     if token not in self._token_stats:
                         self._token_stats[token] = {"count": 0, "total_size_mb": 0.0}
@@ -216,18 +225,17 @@ class AssetScanner:
 
                 yield file_data
 
-        # Завершение
         self._stats["total_size_mb"] = round(self._stats["total_size_mb"], 2)
         self._stats["time_sec"] = round(time.time() - start_time, 2)
 
-        # Округление веса токенов
         for t in self._token_stats:
             self._token_stats[t]["total_size_mb"] = round(self._token_stats[t]["total_size_mb"], 4)
 
     def get_result(self) -> ScanResult:
         """
-        Возвращает итоговый объект ScanResult.
-        Вызывать после того, как scan_generator() завершил работу.
+        Формирует итоговый объект ScanResult на основе собранных данных.
+
+        :return: Экземпляр ScanResult с полным набором статистических данных.
         """
         return ScanResult(
             summary=self._stats,

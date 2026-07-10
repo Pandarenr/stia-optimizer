@@ -1,35 +1,22 @@
-import time
-from core.scanner import AssetScanner
+import sys
+from PyQt6.QtWidgets import QApplication
 
-def test_scan():
-    # Укажи путь к своей папке модов
-    path_to_scan = input("Введите путь для теста (папка mods или конкретный мод): ")
+from ui.main_window import MainWindow
 
-    scanner = AssetScanner(path_to_scan)
-    print(f"Режим сканирования: {scanner.mode}")
-    print("Начинаю анализ...")
+def main():
+    """
+    Точка входа в приложение. Выполняет инициализацию графического окружения,
+    конфигурацию базовых параметров интерфейса и запуск цикла обработки событий.
+    """
+    app = QApplication(sys.argv)
 
-    # Имитируем Progress Bar
-    count = 0
-    for file_data in scanner.scan_generator():
-        count += 1
-        if count % 100 == 0:
-            print(f"Просканировано: {count} файлов...")
+    # Использование стиля Fusion обеспечивает кроссплатформенное единообразие графического интерфейса.
+    app.setStyle("Fusion")
 
-    # Получаем финальный результат
-    result = scanner.get_result()
+    window = MainWindow()
+    window.show()
 
-    print("\n" + "="*50)
-    print(f"АНАЛИЗ ЗАВЕРШЕН за {result.summary['time_sec']} сек.")
-    print(f"Всего файлов: {result.summary['count']}")
-    print(f"Общий вес: {result.summary['total_size_mb']:.2f} MB")
-    print("="*50)
-
-    # Выводим Топ-10 токенов по весу
-    print("\nТОП-10 ТЯЖЕЛЫХ КАТЕГОРИЙ (ТОКЕНОВ):")
-    sorted_tokens = sorted(result.token_stats.items(), key=lambda x: x[1]['total_size_mb'], reverse=True)
-    for token, stats in sorted_tokens[:10]:
-        print(f" - {token:<15} : {stats['total_size_mb']:>10.2f} MB ({stats['count']} файлов)")
+    sys.exit(app.exec())
 
 if __name__ == "__main__":
-    test_scan()
+    main()
