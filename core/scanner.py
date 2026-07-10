@@ -126,7 +126,7 @@ class AssetScanner:
         # Находим все совпадения, фильтруем и убираем дубликаты за один проход
         tokens = {
             token for token in self._TOKEN_PATTERN.findall(text_lc)
-            if len(token) >= 2 and token not in self.IGNORE_TOKENS
+            if len(token) >= 2 and token not in self.IGNORE_TOKENS and not token.isdigit()
         }
 
         return list(tokens)
